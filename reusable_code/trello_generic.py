@@ -14,6 +14,9 @@ import threading
 import time
 
 import sys
+import datetime as dt
+import numpy as np
+
 sys.path.append(r'/home/jupyter/reusable_code')
 import google_api_functions as gaf
 from xlsxwriter.utility import xl_rowcol_to_cell
@@ -496,7 +499,9 @@ def loadCard(card,n=1,naming_dict={'name':'Name','labels':'Labels','list':'List'
     #print(n,': ',card.name,)
     card_dict[naming_dict['name']]=card.name
     card_dict['Description']=card.description
-    card_dict[naming_dict['list']]=[x.name for x in my_lists if x.id==card.list_id][0]
+    
+    card_list_name=[x.name for x in my_lists if x.id==card.list_id][0] # Store in a variable for use later, retrieve without another call
+    card_dict[naming_dict['list']]=card_list_name
     card_dict['Due Date']=card.due_date
     card_dict['Trello ID']=card.id
     card_dict['Trello URL']=card.short_url
@@ -504,8 +509,9 @@ def loadCard(card,n=1,naming_dict={'name':'Name','labels':'Labels','list':'List'
 
     ################### Creation date #####################################################################
     # 0 API calls
+    creation=card.card_created_date
     try:
-        card_dict['Card Created Date']=str(card.card_created_date)[:10]
+        card_dict['Card Created Date']=str(creation)[:10]
     except:
         pass
 
@@ -563,7 +569,52 @@ def loadCard(card,n=1,naming_dict={'name':'Name','labels':'Labels','list':'List'
         card_dict['Trello attachments']=delimiter.join([i.url for i in card_attachments if 'trello' in i.url])
         card_dict['Other attachments']=delimiter.join([i.url for i in card_attachments if 'trello' not in i.url])
 
+    ################### List Movements #####################################################################
+   
+    movements=card.list_movements() # Get card movements
 
+    movements2=[{'from':i['source']['name'],\
+                'to':i['destination']['name'],\
+                'when':i['datetime'].replace(tzinfo=None)} for i in movements] # Rename & subset the fields
+    
+    ### Add in records for "creation">> first list and current_list to "now"
+    if len(movements2)==0:
+        movements2=[{'from':'Nothing','to':card_list_name,'when':creation},\
+                   {'from':card_list_name,'to':'Refresh','when':datetime.now()}\
+                   ]
+
+    else:
+        movements2.append({'from':'Nothing','to':movements2[-1]['from'], 'when':creation})
+        movements2.append({'from':card_list_name,'to':'Refresh','when':datetime.now()})
+    
+    # Convert to a dataframe and order by time for further analysis
+    movement_df=pd.DataFrame(movements2).sort_values(by='when')
+    
+    movement_df=movement_df.rename(columns={'when':'exitedTime','from':'enteredList','to':'exitedTo'}) # Rename cols (again)
+    movement_df['enteredTime']=movement_df['exitedTime'].shift(1) # Get lagged value of list exited to get list entered date 
+    movement_df['timeSpent']=(movement_df['exitedTime']-movement_df['enteredTime']).dt.days # Calc days in list
+    movement_df['isCurrent']=movement_df['enteredList'].apply(lambda x: 1 if x==card_list_name else 0) # Flag current list
+    
+    ### Summary stats
+    summary_df=movement_df[['isCurrent','enteredList','timeSpent','enteredTime','exitedTime']].groupby(['isCurrent','enteredList']).\
+        agg({'timeSpent' : [np.sum, 'count'],\
+    'enteredTime' : [np.min, np.max],'exitedTime':'max'}).\
+        rename(columns={'sum':'timeSpent','count':'timesEntered','amin':'FirstEntered','amax':'LastEntered',\
+                        'max':'LastExited'}).droplevel(level=0,axis=1)
+    
+    ### Convert back to dict
+    summary_dict=summary_df.reset_index().to_dict(orient='rows')
+    current_list_summary=[i for i in summary_dict if i['isCurrent']==1][0] # Subset to just current row
+    
+    card_dict['listMovementHistory']=movement_df.reset_index(drop=True).to_dict(orient='rows')
+    card_dict['listMovementSummary']=summary_dict
+    
+    card_dict['currentListTimeSpent']=current_list_summary['timeSpent']
+    card_dict['currentListTimesEntered']=current_list_summary['timesEntered']
+    card_dict['currentListFirstEntered']=current_list_summary['FirstEntered']
+    card_dict['currentListLastEntered']=current_list_summary['LastEntered']
+    
+    
     ################### Custom Field Info #####################################################################
     
     # Option 1: Using Trello class 
@@ -613,6 +664,10 @@ def loadCard(card,n=1,naming_dict={'name':'Name','labels':'Labels','list':'List'
 
      ################### END of Custom Field Info #####################################################################
 
+
+    
+    
+    
     apicheck2=session.get('https://api.trello.com/1/members/me',params={'key':mykey,'token':mytoken}) 
     # calls_used=int(apicheck1.headers['X-Rate-Limit-Api-Token-Remaining'])-int(apicheck2.headers['X-Rate-Limit-Api-Token-Remaining'])
     # print('There are {} calls remaining in quota. This card used {} calls.'.format(apicheck2.headers['X-Rate-Limit-Api-Token-Remaining'],calls_used)) # See if hitting up against rate limits
@@ -632,7 +687,8 @@ def cards_to_dataframe(myboard_creds\
                        ,checklist_names=[]\
                        ,delimiter='| '\
                        ,card_number_cutoff=10000\
-                       ,get_attachments=False
+                       ,get_attachments=False\
+                       ,lists_to_exclude=None
                       ):
     
   
@@ -654,9 +710,19 @@ def cards_to_dataframe(myboard_creds\
         board_labels=myboard.get_labels() #Retrieve all labels on board for reference
     else:
         board_labels=None
-        
-    my_cards=myboard.get_cards()
+    
+
+    
     my_lists=myboard.list_lists()
+    
+    # Conditionally load cards depending on whether they are in appropriate list
+    if lists_to_exclude:
+        filteredLists=[listObj for listObj in my_lists if listObj.name not in lists_to_exclude] # Create a filtered list of lists
+        my_cards=[cardObj for cardObj in [listObj.list_cards() for listObj in filteredLists]] # Load only cards on those lists
+        my_cards = [cardObj for cardList  in my_cards for cardObj in cardList ] # Flatten list out
+    else:
+        my_cards=myboard.get_cards() # Single call to get all cards on board
+
     boardLookups=customFieldFullLookup(myboard_creds) # Lookup tables for Custom Field Names and Custom Field Values (if a list)
     
     # Store these so they can be passed onwards to each individual card load later
@@ -713,12 +779,38 @@ def cards_to_dataframe(myboard_creds\
     
     duration = time.time() - start_time
     print("Downloaded {} in {} seconds".format(len(cardLoop),duration))
-    card_list=list(card_list)
-    card_list_for_df=[{key:val for key, val in i.items() if key != 'Card Object'} for i in card_list]
+    
+    
+    
+    
+    ###########################
+    # Get positional information
+    ###########################
+    list_names={i.id:i.name for i in my_lists} # List Name lookup
+    list_pos={i.id:n+1 for n,i in enumerate(my_lists)} # List Position lookup
+    cardpos=pd.DataFrame([{'cardid':card.id,'name':card.name, 'pos': card.pos, 'list':list_names[card.list_id],\
+                           'listpos':list_pos[card.list_id]} for card in my_cards]).sort_values(by=['listpos','pos'])
+    cardpos['boardpos']=cardpos.reset_index().index+1
+    cardpos['cardpos']=cardpos.groupby('listpos').cumcount()+1
+    #cardpos=[i['listpos']:list_pos[i['list']] for i in cardpos ]
+    poslist=cardpos.drop(columns=['pos']).to_dict(orient='rows')
+    
+    card_list_withPos=[]
+    for card in card_list:
+        for matched_card in poslist:
+            if card['Trello ID']==matched_card['cardid']:
+                card['listpos']=matched_card['listpos']
+                card['cardpos']=matched_card['cardpos']
+                card['boardpos']=matched_card['boardpos']
+                card['coordinates']=(matched_card['listpos'],matched_card['cardpos'])                
+                card_list_withPos.append(card)
+    
+    #card_list=list(card_list)
+    card_list_for_df=[{key:val for key, val in i.items() if key != 'Card Object'} for i in card_list_withPos]
     card_df=pd.DataFrame(card_list_for_df) # Store as a dataframe
     
     
-    return card_df,card_list
+    return card_df,card_list_withPos
     
     
      
