@@ -16,6 +16,7 @@ import time
 import sys
 import datetime as dt
 import numpy as np
+import re
 
 sys.path.append(r'/home/jupyter/reusable_code')
 import google_api_functions as gaf
@@ -515,7 +516,14 @@ def loadCard(card,n=1,naming_dict={'name':'Name','labels':'Labels','list':'List'
     except:
         pass
 
-
+    ################### Card number #####################################################################
+    
+    if re.search('\#\d{1,4}',card.name)!=None:
+        card_dict['Card Number']=int(re.search('\#(\d{1,4})',card.name)[1])
+    else:
+        card_dict['Card Number']=None
+                                     
+    
     ################### Checklists #####################################################################
     # N API calls where N=num checklists
     
@@ -784,14 +792,14 @@ def cards_to_dataframe(myboard_creds\
     
     
     ###########################
-    # Get positional information
+    # Get positional information for each card
     ###########################
     list_names={i.id:i.name for i in my_lists} # List Name lookup
     list_pos={i.id:n+1 for n,i in enumerate(my_lists)} # List Position lookup
     cardpos=pd.DataFrame([{'cardid':card.id,'name':card.name, 'pos': card.pos, 'list':list_names[card.list_id],\
                            'listpos':list_pos[card.list_id]} for card in my_cards]).sort_values(by=['listpos','pos'])
     cardpos['boardpos']=cardpos.reset_index().index+1
-    cardpos['cardpos']=cardpos.groupby('listpos').cumcount()+1
+    cardpos['cardpos']=cardpos.groupby('listpos').cumcount()
     #cardpos=[i['listpos']:list_pos[i['list']] for i in cardpos ]
     poslist=cardpos.drop(columns=['pos']).to_dict(orient='rows')
     
