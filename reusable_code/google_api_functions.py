@@ -1,7 +1,7 @@
 from google_auth_oauthlib import flow # To authorise as user
 from googleapiclient.discovery import build # To pull in from sheets, slides etc. API
 from google.auth.transport.requests import Request
-from google.cloud.bigquery import magics
+#from google.cloud.bigquery import magics
 import os
 import pickle
 
